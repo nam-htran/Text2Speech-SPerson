@@ -1,0 +1,447 @@
+
+===== ./app.py =====
+# ===== ./app.py (PHIÊN BẢN QUẢN LÝ NGƯỜI NÓI ĐỘNG) =====
+from flask import Flask, render_template, request, jsonify, session
+import os
+import torch
+from TTS.api import TTS
+import uuid
+from pydub import AudioSegment
+from datetime import timedelta
+import json
+
+# ... (Các phần import an toàn giữ nguyên) ...
+from torch.serialization import add_safe_globals
+from TTS.tts.configs.xtts_config import XttsConfig
+from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+from TTS.config.shared_configs import BaseDatasetConfig
+add_safe_globals([XttsConfig, XttsAudioConfig, XttsArgs, BaseDatasetConfig])
+
+
+app = Flask(__name__)
+# ... (Cấu hình app giữ nguyên) ...
+app.config['SECRET_KEY'] = os.urandom(24)
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=1)
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app.config['OUTPUT_FOLDER'] = 'static/outputs'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+
+
+print("🚀 Đang tải model XTTS v2... Vui lòng chờ.")
+tts = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=False)
+print("✅ Model đã sẵn sàng!")
+
+# Các giọng nói mặc định
+DEFAULT_VOICES = {
+    "male_zh_mp3": {"name": "Giọng Nam (Tiếng Trung)", "path": "samples/male_zh.mp3"},
+    "female_zh_mp3": {"name": "Giọng Nữ (Tiếng Trung)", "path": "samples/female_zh.mp3"},
+}
+SUPPORTED_LANGUAGES = { "zh-cn": "Chinese (Simplified)", "en": "English", "vi": "Vietnamese" }
+
+def clear_session_files():
+    """Xóa các file được tạo trong phiên trước đó."""
+    if 'generated_files' in session:
+        for file_path in session.get('generated_files', []):
+            try:
+                if os.path.exists(file_path): os.remove(file_path)
+            except Exception as e: print(f"Lỗi khi xóa file {file_path}: {e}")
+    session['generated_files'] = []
+
+@app.route("/")
+def index():
+    # Khôi phục trạng thái từ session hoặc dùng giá trị mặc định
+    session_state = {
+        'speakers': session.get('speakers', {
+            'A': {'voice': 'male_zh_mp3'},
+            'B': {'voice': 'female_zh_mp3'}
+        }),
+        'uploaded_voices': session.get('uploaded_voices', {}),
+        'script': session.get('script', 'A: 你好。\nB: 你好吗？'),
+        'language': session.get('language', 'zh-cn'),
+        'speed': session.get('speed', 1.0)
+    }
+    session.permanent = True
+    return render_template("index.html", languages=SUPPORTED_LANGUAGES, default_voices=DEFAULT_VOICES, session_state=session_state)
+
+@app.route("/generate", methods=["POST"])
+def generate():
+    # Bắt đầu một phiên hội thoại mới, xóa file cũ
+    clear_session_files()
+    
+    # Lấy dữ liệu từ form
+    data = request.form
+    script = data.get('script')
+    language = data.get('language')
+    speed = data.get('speed', 1.0, type=float)
+    # Nhận cấu hình speakers từ frontend dưới dạng chuỗi JSON
+    speakers_config = json.loads(data.get('speakers_config', '{}'))
+
+    # Lưu lại trạng thái input để khôi phục
+    session['script'] = script
+    session['language'] = language
+    session['speed'] = speed
+    session['speakers'] = speakers_config
+    
+    # Xây dựng bản đồ giọng nói cho lần tạo này
+    # Bắt đầu với các giọng mặc định
+    voice_map = {key: value['path'] for key, value in DEFAULT_VOICES.items()}
+    
+    # Xử lý các file được tải lên
+    # `request.files` chứa các file được gửi từ form
+    for file_key, file_storage in request.files.items():
+        if file_storage.filename != '':
+            # file_key sẽ có dạng `file_A`, `file_C`,...
+            # Trích xuất mã người nói (A, C,...)
+            speaker_id = file_key.split('_')[-1]
+            
+            # Lưu file tải lên với tên duy nhất
+            save_path, _ = handle_file_upload(file_storage)
+            
+            # Cập nhật bản đồ giọng nói: giọng tùy chỉnh sẽ ghi đè giọng mặc định
+            # Tạo một id giọng nói duy nhất cho file này
+            custom_voice_id = f"custom_{speaker_id}"
+            voice_map[custom_voice_id] = save_path
+            
+            # Cập nhật cấu hình của người nói để sử dụng giọng nói tùy chỉnh này
+            speakers_config[speaker_id]['voice'] = custom_voice_id
+
+            # Thêm file đã upload vào danh sách cần dọn dẹp
+            session['generated_files'].append(save_path)
+
+    # Bắt đầu xử lý kịch bản
+    lines = [l.strip() for l in script.strip().split("\n") if l.strip()]
+    audio_files_data = []
+    newly_created_paths = []
+
+    for line in lines:
+        parts = line.split(":", 1)
+        if len(parts) != 2: continue
+        
+        speaker_id = parts[0].strip().upper()
+        text = parts[1].strip()
+
+        # Tìm giọng nói cho speaker này
+        if speaker_id not in speakers_config:
+            print(f"Bỏ qua dòng vì không tìm thấy cấu hình cho người nói '{speaker_id}'")
+            continue
+        
+        voice_id_for_speaker = speakers_config[speaker_id]['voice']
+        
+        if voice_id_for_speaker not in voice_map:
+            print(f"Bỏ qua dòng vì không tìm thấy giọng nói '{voice_id_for_speaker}' trong bản đồ")
+            continue
+            
+        speaker_path = voice_map[voice_id_for_speaker]
+        
+        # Tạo file âm thanh
+        output_filename = f"{uuid.uuid4()}.wav"
+        output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+        try:
+            tts.tts_to_file(text=text, speaker_wav=speaker_path, language=language, file_path=output_path, speed=speed)
+            session['generated_files'].append(output_path)
+            newly_created_paths.append(output_path)
+            audio_files_data.append({"speaker": speaker_id, "text": text, "path": output_path})
+        except Exception as e:
+            print(f"Lỗi khi tạo TTS: {e}")
+            return jsonify({"error": f"Không thể xử lý dòng: '{line}'. Chi tiết: {str(e)}"}), 500
+            
+    # Gộp các file vừa tạo
+    combined_path = combine_audio_files(newly_created_paths)
+    if combined_path:
+        session['generated_files'].append(combined_path)
+
+    return jsonify({
+        "results": audio_files_data,
+        "conversation_audio": combined_path,
+        # Gửi lại trạng thái mới để frontend có thể cập nhật
+        "updated_session_state": { "speakers": speakers_config }
+    })
+
+# ... Các hàm phụ khác ...
+@app.route("/clear_all")
+def clear_all_session_data():
+    clear_session_files()
+    session.clear()
+    return jsonify({"status": "success", "message": "Toàn bộ session và file đã được xóa."})
+
+def handle_file_upload(file):
+    filename = f"{uuid.uuid4()}_{os.path.basename(file.filename)}"
+    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(save_path)
+    return save_path, os.path.basename(file.filename)
+
+def combine_audio_files(file_paths):
+    if not file_paths: return None
+    combined = AudioSegment.empty()
+    for path in file_paths:
+        try: combined += AudioSegment.from_wav(path)
+        except Exception as e: print(f"Lỗi khi đọc file {path} để nối: {e}"); continue
+    combined_filename = f"conversation_{uuid.uuid4()}.wav"
+    combined_path = os.path.join(app.config['OUTPUT_FOLDER'], combined_filename)
+    combined.export(combined_path, format="wav")
+    return combined_path
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=7860, debug=True)
+
+===== ./templates/index.html =====
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XTTS Dynamic Conversation Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loader { border: 5px solid #f3f3f3; border-top: 5px solid #3498db; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .speaker-card { transition: all 0.3s ease-in-out; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-blue-600">🎙️ XTTS Dynamic Conversation Generator</h1>
+            <p class="text-gray-600 mt-2">Tạo hội thoại với người nói tùy chỉnh</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <!-- Cột điều khiển -->
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <form id="tts-form">
+                    <!-- Cài đặt chung -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label for="language" class="block text-sm font-medium text-gray-700 mb-1">Ngôn ngữ:</label>
+                            <select id="language" name="language" class="w-full p-2 border border-gray-300 rounded-md">
+                                {% for code, name in languages.items() %}<option value="{{ code }}" {% if code == session_state.language %}selected{% endif %}>{{ name }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label for="speed" class="block text-sm font-medium text-gray-700 mb-1">Tốc độ: <span id="speed-value" class="font-bold text-blue-600">{{ "%.2f"|format(session_state.speed) }}</span></label>
+                            <input type="range" id="speed" name="speed" min="0.5" max="2.0" value="{{ session_state.speed }}" step="0.05" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                        </div>
+                    </div>
+                    
+                    <!-- ⭐ QUẢN LÝ NGƯỜI NÓI ĐỘNG ⭐ -->
+                    <div class="mb-4">
+                        <h3 class="text-lg font-semibold mb-2">Quản lý Người nói</h3>
+                        <div id="speakers-container" class="space-y-4">
+                            <!-- JavaScript sẽ tự động điền các thẻ người nói vào đây -->
+                        </div>
+                        <button type="button" id="add-speaker-btn" class="mt-4 text-sm bg-green-500 text-white font-bold py-2 px-4 rounded-md hover:bg-green-600">
+                            + Thêm Người nói
+                        </button>
+                    </div>
+
+                    <!-- Kịch bản -->
+                    <div class="mb-4">
+                        <label for="script" class="block text-sm font-medium text-gray-700 mb-1">Kịch bản hội thoại:</label>
+                        <textarea id="script" name="script" rows="8" class="w-full p-2 border border-gray-300 rounded-md" 
+                        placeholder="Sử dụng mã người nói đã định nghĩa ở trên. Ví dụ:
+A: 你好。
+B: 你好吗？
+C: 我很好。">{{ session_state.script }}</textarea>
+                    </div>
+
+                    <div class="flex items-center space-x-4">
+                        <button type="submit" id="generate-btn" class="flex-grow bg-blue-600 text-white font-bold py-3 px-4 rounded-md hover:bg-blue-700">Tạo Giọng nói</button>
+                        <button type="button" id="clear-session-btn" title="Xóa toàn bộ session và file đã tạo" class="bg-red-500 text-white p-3 rounded-md hover:bg-red-600"><svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Cột kết quả (giữ nguyên logic) -->
+            <div class="bg-white p-6 rounded-lg shadow-lg flex flex-col">
+                <h2 class="text-2xl font-bold mb-4 border-b pb-2">Kết quả Hội thoại</h2>
+                <div id="loading" class="hidden flex-col items-center justify-center py-10"><div class="loader"></div><p class="mt-4 text-gray-600">Đang tạo giọng nói...</p></div>
+                <div id="error-message" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4"></div>
+                <div id="result-area">
+                    <p id="result-placeholder" class="text-gray-500">Kết quả sẽ xuất hiện ở đây.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- DATA từ Server ---
+        const sessionState = {{ session_state|tojson|safe }};
+        const defaultVoices = {{ default_voices|tojson|safe }};
+
+        // --- ELEMENTS ---
+        const form = document.getElementById('tts-form');
+        const speakersContainer = document.getElementById('speakers-container');
+        const addSpeakerBtn = document.getElementById('add-speaker-btn');
+        // ... các element khác
+
+        // --- FUNCTIONS ---
+        function createVoiceOptions(selectedVoice) {
+            let options = '<option value="">-- Chọn giọng mặc định --</option>';
+            for (const [id, voice] of Object.entries(defaultVoices)) {
+                const isSelected = id === selectedVoice ? 'selected' : '';
+                options += `<option value="${id}" ${isSelected}>${voice.name}</option>`;
+            }
+            return options;
+        }
+
+        function createSpeakerCard(speakerId, speakerConfig) {
+            const card = document.createElement('div');
+            card.className = 'speaker-card border p-3 rounded-lg bg-gray-50';
+            card.dataset.speakerId = speakerId;
+
+            // Hiển thị tên file đã upload nếu có
+            let uploadedFileInfo = '';
+            if (speakerConfig.file_info) {
+                uploadedFileInfo = `<span class="text-xs text-green-600 ml-2">Đã tải lên: ${speakerConfig.file_info.name}</span>`;
+            }
+
+            card.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <h4 class="text-md font-bold">Người nói: ${speakerId}</h4>
+                    <button type="button" class="remove-speaker-btn text-red-500 hover:text-red-700 font-bold text-xl">×</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2">
+                    <div>
+                        <label class="text-xs">Chọn giọng mặc định:</label>
+                        <select name="voice_${speakerId}" class="voice-select w-full p-1 border text-sm border-gray-300 rounded-md">
+                            ${createVoiceOptions(speakerConfig.voice)}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-xs">Hoặc tải lên giọng tùy chỉnh:</label>
+                        <input type="file" name="file_${speakerId}" class="voice-file w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                        ${uploadedFileInfo}
+                    </div>
+                </div>
+            `;
+            speakersContainer.appendChild(card);
+            card.querySelector('.remove-speaker-btn').addEventListener('click', () => card.remove());
+        }
+        
+        function getNextSpeakerId() {
+            const existingIds = Array.from(speakersContainer.querySelectorAll('.speaker-card')).map(card => card.dataset.speakerId);
+            let charCode = 65; // 'A'
+            while (true) {
+                const nextId = String.fromCharCode(charCode);
+                if (!existingIds.includes(nextId)) {
+                    return nextId;
+                }
+                charCode++;
+            }
+        }
+
+        function renderAllSpeakers() {
+            speakersContainer.innerHTML = '';
+            for (const [id, config] of Object.entries(sessionState.speakers)) {
+                createSpeakerCard(id, config);
+            }
+        }
+
+        function getSpeakersConfigFromDOM() {
+            const config = {};
+            speakersContainer.querySelectorAll('.speaker-card').forEach(card => {
+                const id = card.dataset.speakerId;
+                const voice = card.querySelector('.voice-select').value;
+                config[id] = { voice: voice }; // Chỉ lưu voice mặc định, file upload xử lý riêng
+            });
+            return config;
+        }
+
+        // --- EVENT LISTENERS ---
+        addSpeakerBtn.addEventListener('click', () => {
+            const newId = getNextSpeakerId();
+            createSpeakerCard(newId, { voice: '' }); // Thẻ mới không chọn giọng nào
+        });
+        
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const generateBtn = document.getElementById('generate-btn');
+            const loadingSpinner = document.getElementById('loading');
+            const errorMessageDiv = document.getElementById('error-message');
+            const resultArea = document.getElementById('result-area');
+
+            generateBtn.disabled = true;
+            generateBtn.innerHTML = '<span class="animate-pulse">Đang xử lý...</span>';
+            loadingSpinner.classList.remove('hidden');
+            errorMessageDiv.classList.add('hidden');
+            resultArea.innerHTML = '';
+
+            const formData = new FormData(form);
+            // Thêm cấu hình speakers vào form data
+            formData.append('speakers_config', JSON.stringify(getSpeakersConfigFromDOM()));
+            
+            // Xóa các input file trống, chỉ gửi file có nội dung
+            document.querySelectorAll('input[type="file"]').forEach(input => {
+                if (input.files.length === 0) {
+                    formData.delete(input.name);
+                }
+            });
+
+            try {
+                const response = await fetch('/generate', { method: 'POST', body: formData });
+                if (!response.ok) { /* ... */ }
+
+                const data = await response.json();
+                
+                // Cập nhật lại trạng thái speakers từ server và render lại
+                sessionState.speakers = data.updated_session_state.speakers;
+                renderAllSpeakers();
+                
+                // Hiển thị kết quả
+                let resultHTML = '';
+                if (data.conversation_audio) { /* ... */ }
+                resultHTML += '...'; // Xây dựng HTML như phiên bản trước
+                resultArea.innerHTML = resultHTML;
+                
+            } catch (error) { /* ... */ } 
+            finally { /* ... */ }
+        });
+
+        // --- INITIALIZATION ---
+        renderAllSpeakers();
+        
+        // **Lưu ý:** Để ngắn gọn, các phần code JS không thay đổi lớn so với phiên bản trước đã được lược bỏ.
+        // Bạn hãy copy toàn bộ file để có code hoàn chỉnh nhất.
+    </script>
+</body>
+</html>
+
+===== ./.devcontainer/devcontainer.json =====
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/python
+{
+	"name": "Python 3",
+	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	"image": "mcr.microsoft.com/devcontainers/python:1-3.10-bookworm"
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	// "features": {},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	// "postCreateCommand": "pip3 install --user -r requirements.txt",
+
+	// Configure tool-specific properties.
+	// "customizations": {},
+
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	// "remoteUser": "root"
+}
+
+
+===== DIRECTORY TREE =====
+./
+    requirements.txt
+    app.py
+    templates/
+        index.html
+    .github/
+        dependabot.yml
+    samples/
+        male_zh.mp3
+        female_zh.mp3
+    .devcontainer/
+        devcontainer.json

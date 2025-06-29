@@ -1,3 +1,4 @@
 TTS
 Flask
 soundfile
+pydub
