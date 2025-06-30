@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="{{ ui_lang }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ ui_strings.title }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .loader { border: 5px solid #f3f3f3; border-top: 5px solid #3b82f6; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #advanced-panel { max-height: 0; overflow: hidden; transition: max-height 0.5s ease-in-out, padding 0.5s ease-in-out, border-width 0.3s ease-in-out; padding-top: 0; padding-bottom: 0; border-top-width: 0px; }
+        #advanced-toggle:checked ~ #advanced-panel { max-height: 500px; padding-top: 1rem; padding-bottom: 1rem; border-top-width: 1px; }
+        .panel { transition: opacity 0.3s ease-in-out, max-height 0.3s ease-in-out; }
+        .voice-source-radio { position: absolute; opacity: 0; width: 0; height: 0; }
+        .voice-source-label {
+            cursor: pointer; padding: 0.25rem 0.75rem; border: 1px solid #d1d5db; border-bottom-width: 0;
+            background-color: #f9fafb; color: #6b7280; font-size: 0.875rem;
+            border-top-left-radius: 0.375rem; border-top-right-radius: 0.375rem;
+            transition: all 0.2s ease-in-out;
+        }
+        .voice-source-radio:checked + .voice-source-label {
+            background-color: white; color: #2563eb; border-color: #d1d5db; font-weight: 600;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: #2563eb; cursor: pointer;
+            transition: background 0.2s ease-in-out;
+        }
+        input[type="range"]:hover::-webkit-slider-thumb { background: #1d4ed8; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div class="container mx-auto p-4 md:p-6 lg:p-8 max-w-7xl"> 
+        
+        <header class="text-center mb-8 relative">
+            <div class="absolute top-0 right-0 text-xs sm:text-sm bg-white/50 backdrop-blur-sm px-2 py-1 rounded-md">
+                {% for code, name in supported_ui_langs.items() %}
+                    <a href="?lang={{ code }}" class="p-1 {{ 'font-bold text-blue-600' if code == ui_lang else 'text-gray-500 hover:text-blue-500' }}">{{ name }}</a>
+                    {% if not loop.last %} <span class="text-gray-300">|</span> {% endif %}
+                {% endfor %}
+            </div>
+            <h1 class="text-3xl md:text-4xl font-bold text-blue-600 pt-10 sm:pt-0">🎙️ {{ ui_strings.title }}</h1>
+            <p class="text-gray-500 mt-2">{{ ui_strings.subtitle }}</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <!-- Cột điều khiển -->
+            <div class="bg-white p-6 rounded-2xl shadow-lg border border-gray-200/80">
+                <form id="tts-form" class="space-y-6">
+                    
+                    <!-- ⭐⭐⭐ MỚI: LỰA CHỌN CHẾ ĐỘ ⭐⭐⭐ -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ ui_strings.generation_mode }}</label>
+                        <div class="grid grid-cols-2 gap-2 rounded-lg bg-gray-100 p-1">
+                            <div>
+                                <input type="radio" id="mode_local" name="generation_mode" value="local" class="peer hidden" {% if session_state.generation_mode == 'local' %}checked{% endif %}>
+                                <label for="mode_local" class="block cursor-pointer select-none rounded-md p-2 text-center text-sm font-semibold peer-checked:bg-blue-600 peer-checked:text-white peer-checked:shadow-md transition-all">
+                                    {{ ui_strings.local_mode }}
+                                </label>
+                            </div>
+                            <div>
+                                <input type="radio" id="mode_api" name="generation_mode" value="api" class="peer hidden" {% if session_state.generation_mode == 'api' %}checked{% endif %}>
+                                <label for="mode_api" class="block cursor-pointer select-none rounded-md p-2 text-center text-sm font-semibold peer-checked:bg-green-600 peer-checked:text-white peer-checked:shadow-md transition-all">
+                                    {{ ui_strings.api_mode }}
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ⭐⭐⭐ THAY ĐỔI: DROPDOWN NGÔN NGỮ ⭐⭐⭐ -->
+                    <div>
+                         <label for="language_to_generate" class="block text-sm font-medium text-gray-700 mb-1">Language to Generate</label>
+                         <select id="language_to_generate" name="language_to_generate" class="w-full p-2 text-sm border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 transition">
+                            {% for code, name in languages_master.items() %}
+                            <option value="{{ code }}" {% if code == session_state.language_to_generate %}selected{% endif %}>{{ name }}</option>
+                            {% endfor %}
+                         </select>
+                    </div>
+
+                    <div class="border-t border-gray-200 pt-6">
+                        <h3 class="text-lg font-semibold mb-3 text-gray-800">{{ ui_strings.manage_speakers }}</h3>
+                        <div id="speakers-container" class="space-y-4"></div>
+                        <button type="button" id="add-speaker-btn" class="mt-4 text-xs bg-green-100 text-green-800 font-bold py-2 px-4 rounded-lg hover:bg-green-200 transition-colors flex items-center gap-1.5">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" /></svg>
+                            {{ ui_strings.add_speaker }}
+                        </button>
+                    </div>
+
+                    <div class="border-t border-gray-200 pt-6">
+                        <label for="script" class="block text-sm font-medium text-gray-700 mb-1">{{ ui_strings.script_label }}</label>
+                        <textarea id="script" name="script" rows="6" class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm transition" placeholder="{{ ui_strings.script_placeholder }}"></textarea>
+                    </div>
+                    
+                    <div class="border-t border-gray-200 pt-6">
+                        <input type="checkbox" id="advanced-toggle" class="hidden">
+                        <label for="advanced-toggle" class="cursor-pointer text-sm font-semibold text-blue-600 hover:text-blue-800 flex items-center justify-between">
+                            <span>{{ ui_strings.advanced_settings }}</span>
+                            <svg class="w-4 h-4 transition-transform transform" id="advanced-arrow" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                        </label>
+                        <div id="advanced-panel" class="mt-4 border-gray-200">
+                             <div id="advanced-sliders" class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+                                <!-- Các thanh trượt sẽ được thêm vào đây bởi JS -->
+                             </div>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center space-x-3 pt-4">
+                        <button type="submit" id="generate-btn" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 transition-all shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 text-base">
+                            {{ ui_strings.generate_button }}
+                        </button>
+                        <button type="button" id="clear-session-btn" title="{{ ui_strings.clear_button_title }}" class="flex-shrink-0 bg-red-500 text-white p-3 rounded-lg hover:bg-red-600 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                            <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Cột kết quả -->
+            <div class="bg-white p-6 rounded-2xl shadow-lg border border-gray-200/80 flex flex-col">
+                <h2 class="text-xl font-semibold mb-4 border-b border-gray-200 pb-3">{{ ui_strings.results_header }}</h2>
+                <div id="loading" class="hidden flex-col items-center justify-center flex-grow">
+                    <div class="loader"></div>
+                    <p id="loading-message" class="mt-4 text-gray-500"></p>
+                </div>
+                <div id="error-message" class="hidden bg-red-50 border border-red-300 text-red-700 px-4 py-3 rounded-lg text-sm"></div>
+                <div id="result-area" class="space-y-4 overflow-y-auto flex-grow">
+                    <div id="result-placeholder" class="flex flex-col items-center justify-center h-full text-center text-gray-400">
+                        <svg class="w-16 h-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.636 5.636a9 9 0 0112.728 0M18.364 18.364A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+                        <p>{{ ui_strings.no_results }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.location.search.includes('lang=')) {
+                history.replaceState(null, '', window.location.pathname);
+            }
+
+            // --- DATA ---
+            let sessionState = {{ session_state|tojson|safe }};
+            const defaultVoices = {{ default_voices|tojson|safe }};
+            const UI_STRINGS = {{ ui_strings|tojson|safe }};
+            const ADVANCED_PARAMS_CONFIG = {
+                'temperature': { min: 0, max: 1, step: 0.05 }, 'speed': { min: 0.5, max: 2.0, step: 0.05 },
+                'top_k': { min: 1, max: 100, step: 1 }, 'top_p': { min: 0.1, max: 1, step: 0.05 },
+                'repetition_penalty': { min: 1, max: 10, step: 0.5 }, 'length_penalty': { min: 1, max: 10, step: 0.5 }
+            };
+
+            // --- ELEMENTS ---
+            const form = document.getElementById('tts-form');
+            const speakersContainer = document.getElementById('speakers-container');
+            const addSpeakerBtn = document.getElementById('add-speaker-btn');
+            const clearSessionBtn = document.getElementById('clear-session-btn');
+            const generateBtn = document.getElementById('generate-btn');
+            const loadingSpinner = document.getElementById('loading');
+            const loadingMessage = document.getElementById('loading-message');
+            const errorMessageDiv = document.getElementById('error-message');
+            const resultArea = document.getElementById('result-area');
+            const resultPlaceholder = document.getElementById('result-placeholder');
+            const advancedToggle = document.getElementById('advanced-toggle');
+            const advancedArrow = document.getElementById('advanced-arrow');
+            const advancedSlidersContainer = document.getElementById('advanced-sliders');
+
+            let pollInterval;
+            
+            // --- HÀM ---
+            function createDefaultVoiceOptions(selectedVoiceId) {
+                let options = `<option value="">${UI_STRINGS.voice_select_placeholder}</option>`;
+                for (const [id, voice] of Object.entries(defaultVoices)) {
+                    options += `<option value="${id}" ${id === selectedVoiceId ? 'selected' : ''}>${voice.name}</option>`;
+                }
+                return options;
+            }
+
+            function createSpeakerCard(speakerId, speakerConfig) {
+                const card = document.createElement('div');
+                card.className = 'bg-gray-50 rounded-xl shadow-sm overflow-hidden border border-gray-200';
+                card.dataset.speakerId = speakerId;
+                const hasUploadedVoice = sessionState.uploaded_voices && sessionState.uploaded_voices[speakerId];
+                const useUploaded = speakerConfig.voice_source === 'uploaded' && hasUploadedVoice;
+                card.innerHTML = `
+                    <div class="bg-gray-100 p-3 flex justify-between items-center border-b border-gray-200">
+                        <div class="flex items-center gap-3">
+                            <span class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white font-semibold rounded-full text-base">${speakerId}</span>
+                            <h4 class="text-base font-semibold text-gray-800">${UI_STRINGS.speaker_id_prefix} ${speakerId}</h4>
+                        </div>
+                        <button type="button" class="remove-speaker-btn text-gray-400 hover:text-red-600 transition-colors p-1 rounded-full">
+                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                    </div>
+                    <div>
+                        <div class="flex border-b border-gray-200 bg-white">
+                            <input type="radio" id="source_default_${speakerId}" name="source_${speakerId}" value="default" class="voice-source-radio" ${!useUploaded ? 'checked' : ''}>
+                            <label for="source_default_${speakerId}" class="voice-source-label">${UI_STRINGS.voice_source_default}</label>
+                            <input type="radio" id="source_uploaded_${speakerId}" name="source_${speakerId}" value="uploaded" class="voice-source-radio" ${useUploaded ? 'checked' : ''}>
+                            <label for="source_uploaded_${speakerId}" class="voice-source-label">${UI_STRINGS.voice_source_custom}</label>
+                        </div>
+                        <div class="p-4 bg-white space-y-3">
+                            <div class="panel panel-default" style="max-height: ${useUploaded ? '0' : '500px'}; opacity: ${useUploaded ? '0' : '1'};">
+                               <select name="voice_${speakerId}" class="voice-select w-full p-2 text-sm border-gray-300 rounded-lg">${createDefaultVoiceOptions(speakerConfig.voice_id)}</select>
+                            </div>
+                            <div class="panel panel-custom" style="max-height: ${!useUploaded ? '0' : '500px'}; opacity: ${!useUploaded ? '0' : '1'};">
+                                <div class="mb-2">
+                                    ${hasUploadedVoice ? `<p class="text-xs text-gray-800">${UI_STRINGS.current_file}: <span class="font-semibold text-green-600">${sessionState.uploaded_voices[speakerId].name}</span></p>` : `<p class="text-xs text-gray-500">${UI_STRINGS.no_file_uploaded}</p>`}
+                                </div>
+                                <input type="file" name="file_${speakerId}" class="voice-file w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-lg file:border file:border-gray-200 file:font-semibold file:bg-gray-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors" accept="audio/*">
+                            </div>
+                        </div>
+                    </div>`;
+                speakersContainer.appendChild(card);
+                card.querySelector('.remove-speaker-btn').addEventListener('click', () => card.remove());
+                card.querySelectorAll(`input[name="source_${speakerId}"]`).forEach(radio => {
+                    radio.addEventListener('change', (e) => {
+                        const showCustom = e.target.value === 'uploaded';
+                        card.querySelector('.panel-default').style.maxHeight = showCustom ? '0' : '500px';
+                        card.querySelector('.panel-default').style.opacity = showCustom ? '0' : '1';
+                        card.querySelector('.panel-custom').style.maxHeight = showCustom ? '500px' : '0';
+                        card.querySelector('.panel-custom').style.opacity = showCustom ? '1' : '0';
+                    });
+                });
+            }
+            
+            function getNextSpeakerId() {
+                const existingIds = Array.from(speakersContainer.querySelectorAll('[data-speaker-id]')).map(card => card.dataset.speakerId);
+                let charCode = 65;
+                while (true) {
+                    const nextId = String.fromCharCode(charCode);
+                    if (!existingIds.includes(nextId)) return nextId;
+                    charCode++;
+                }
+            }
+            
+            function renderAllSpeakers() {
+                speakersContainer.innerHTML = '';
+                const speakersToRender = (sessionState.speakers && Object.keys(sessionState.speakers).length > 0) ? sessionState.speakers : {
+                    'A': {'voice_source': 'default', 'voice_id': 'male_zh'},
+                    'B': {'voice_source': 'default', 'voice_id': 'female_zh'}
+                };
+                for (const [id, config] of Object.entries(speakersToRender)) {
+                    createSpeakerCard(id, config);
+                }
+            }
+            
+            function getSpeakersConfigFromDOM() {
+                const config = {};
+                speakersContainer.querySelectorAll('[data-speaker-id]').forEach(card => {
+                    const id = card.dataset.speakerId;
+                    const sourceRadio = card.querySelector(`input[name="source_${id}"]:checked`);
+                    const sourceValue = sourceRadio ? sourceRadio.value : 'default';
+                    config[id] = { voice_source: sourceValue };
+                    if (sourceValue === 'default') {
+                        config[id].voice_id = card.querySelector('.voice-select').value;
+                    }
+                });
+                return config;
+            }
+            
+            function displayResults(data) {
+                resultPlaceholder.classList.add('hidden');
+                let resultHTML = '';
+                const finalResult = data.result;
+                if (finalResult.conversation_audio) {
+                    resultHTML += `<div class="p-4 border-b-2 border-blue-200 bg-blue-50 rounded-lg">
+                                    <h3 class="font-semibold text-sm mb-2 text-blue-800">${UI_STRINGS.full_conversation}</h3>
+                                    <audio controls class="w-full h-10"><source src="${finalResult.conversation_audio}?t=${new Date().getTime()}" type="audio/wav"></audio>
+                                   </div>`;
+                }
+                if (finalResult.results && finalResult.results.length > 0) {
+                    resultHTML += `<h3 class="font-semibold text-sm mt-4 mb-2">${UI_STRINGS.individual_lines}</h3>`;
+                    finalResult.results.forEach(item => {
+                        resultHTML += `<div class="p-3 border rounded-lg bg-gray-50">
+                                        <p class="text-sm text-gray-800"><span class="font-bold">${item.speaker}:</span> <span class="italic text-gray-600">"${item.text}"</span></p>
+                                        <audio controls class="w-full mt-2 h-8"><source src="${item.path}?t=${new Date().getTime()}" type="audio/wav"></audio>
+                                       </div>`;
+                    });
+                }
+                resultArea.innerHTML = resultHTML || `<p class="text-gray-500 text-sm">${UI_STRINGS.no_results}</p>`;
+            }
+
+            function pollStatus(jobId) {
+                pollInterval = setInterval(async () => {
+                    try {
+                        const response = await fetch(`/status/${jobId}`);
+                        const data = await response.json();
+                        if (data.status === 'completed') {
+                            clearInterval(pollInterval);
+                            loadingSpinner.classList.add('hidden');
+                            generateBtn.disabled = false;
+                            generateBtn.innerHTML = UI_STRINGS.generate_button;
+                            displayResults(data);
+                        } else if (data.status === 'failed') {
+                            clearInterval(pollInterval);
+                            throw new Error(data.error || UI_STRINGS.error_starting_job);
+                        } else {
+                            loadingMessage.textContent = data.progress || UI_STRINGS.loading_processing;
+                        }
+                    } catch (error) {
+                        clearInterval(pollInterval);
+                        errorMessageDiv.textContent = `${UI_STRINGS.error_checking_status}: ${error.message}`;
+                        errorMessageDiv.classList.remove('hidden');
+                        loadingSpinner.classList.add('hidden');
+                        generateBtn.disabled = false;
+                        generateBtn.innerHTML = UI_STRINGS.generate_button;
+                    }
+                }, 2000);
+            }
+
+            function initializeAdvancedControls() {
+                advancedSlidersContainer.innerHTML = ''; 
+                for (const [name, config] of Object.entries(ADVANCED_PARAMS_CONFIG)) {
+                    const div = document.createElement('div');
+                    const label = name.charAt(0).toUpperCase() + name.slice(1).replace('_', ' ');
+                    const value = sessionState.advanced_params[name] || '0.00';
+                    div.innerHTML = `
+                        <label for="${name}" class="block text-xs font-medium text-gray-600">${label}: <span class="param-value font-bold text-blue-600">${parseFloat(value).toFixed(2)}</span></label>
+                        <input type="range" id="${name}" name="${name}" min="${config.min}" max="${config.max}" step="${config.step}" value="${value}" class="param-slider w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                    `;
+                    advancedSlidersContainer.appendChild(div);
+                }
+                advancedSlidersContainer.querySelectorAll('.param-slider').forEach(slider => {
+                    const valueSpan = slider.previousElementSibling.querySelector('.param-value');
+                    slider.addEventListener('input', () => {
+                        valueSpan.textContent = parseFloat(slider.value).toFixed(2);
+                    });
+                });
+            }
+            
+            // --- EVENT LISTENERS ---
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                if (pollInterval) clearInterval(pollInterval);
+                generateBtn.disabled = true;
+                generateBtn.innerHTML = `<span class="animate-pulse">${UI_STRINGS.loading_starting}</span>`;
+                loadingSpinner.classList.remove('hidden');
+                loadingMessage.textContent = UI_STRINGS.loading_sending;
+                errorMessageDiv.classList.add('hidden');
+                resultArea.innerHTML = ''; 
+                resultPlaceholder.classList.remove('hidden');
+                const formData = new FormData(form);
+                formData.append('speakers_config', JSON.stringify(getSpeakersConfigFromDOM()));
+                document.querySelectorAll('input[type="file"]').forEach(input => {
+                    if (input.files.length === 0) formData.delete(input.name);
+                });
+                try {
+                    const response = await fetch('/generate', { method: 'POST', body: formData });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error || `HTTP Error: ${response.status}`);
+                    
+                    sessionState = data.updated_session_state;
+                    
+                    renderAllSpeakers();
+                    initializeAdvancedControls();
+                    
+                    // Cập nhật lại giá trị các trường input chính sau khi có state mới từ server
+                    document.querySelector(`input[name="generation_mode"][value="${sessionState.generation_mode}"]`).checked = true;
+                    document.getElementById('language_to_generate').value = sessionState.language_to_generate;
+                    document.getElementById('script').value = sessionState.script;
+
+
+                    if (data.status === 'processing' && data.job_id) {
+                        generateBtn.innerHTML = `<span class="animate-pulse">${UI_STRINGS.loading_processing}</span>`;
+                        pollStatus(data.job_id);
+                    } else {
+                        throw new Error(UI_STRINGS.error_starting_job);
+                    }
+                } catch (error) {
+                    errorMessageDiv.textContent = `${UI_STRINGS.error_occurred}: ${error.message}`;
+                    errorMessageDiv.classList.remove('hidden');
+                    resultPlaceholder.classList.remove('hidden');
+                    generateBtn.disabled = false;
+                    generateBtn.innerHTML = UI_STRINGS.generate_button;
+                    loadingSpinner.classList.add('hidden');
+                }
+            });
+            
+            addSpeakerBtn.addEventListener('click', () => {
+                const newId = getNextSpeakerId();
+                const firstDefaultVoiceId = Object.keys(defaultVoices)[0] || '';
+                createSpeakerCard(newId, { voice_source: 'default', voice_id: firstDefaultVoiceId });
+            });
+            
+            clearSessionBtn.addEventListener('click', async () => { 
+                if (!confirm(UI_STRINGS.confirm_clear)) return;
+                try {
+                    const response = await fetch('/clear_all');
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        window.location.href = window.location.pathname;
+                    }
+                } catch (error) {
+                    alert(UI_STRINGS.error_clearing);
+                }
+            });
+
+            advancedToggle.addEventListener('change', () => {
+                advancedArrow.classList.toggle('rotate-180', advancedToggle.checked);
+            });
+
+            // --- INITIALIZATION ---
+            document.getElementById('script').value = sessionState.script; 
+            document.getElementById('language_to_generate').value = sessionState.language_to_generate;
+            renderAllSpeakers();
+            initializeAdvancedControls();
+        });
+    </script>
+</body>
+</html>

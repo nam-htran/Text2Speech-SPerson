@@ -1,0 +1,774 @@
+
+===== ./app.py =====
+# ===== ./app.py (PHIÊN BẢN CUỐI CÙNG - SỬA LỖI ÂM THANH) =====
+from flask import Flask, render_template, request, jsonify, session, send_from_directory
+import os
+import uuid
+from pydub import AudioSegment
+from datetime import timedelta
+import json
+import threading
+import shutil
+from typing import Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from asgiref.wsgi import WsgiToAsgi
+import requests
+
+# ... (Toàn bộ phần mã nguồn từ đầu đến hàm process_single_line_via_api giữ nguyên) ...
+CODESPACE_NAME = os.environ.get("CODESPACE_NAME")
+if CODESPACE_NAME:
+    BASE_URL = f"https://{CODESPACE_NAME}-7861.app.github.dev"
+    print(f"Phát hiện môi trường Github Codespaces. URL công khai được đặt là: {BASE_URL}")
+else:
+    BASE_URL = os.environ.get("PUBLIC_URL")
+    if not BASE_URL:
+        print("CẢNH BÁO: Không phát hiện Github Codespaces hoặc biến môi trường PUBLIC_URL.")
+        BASE_URL = None
+try:
+    from tts_api_client import api_client, CoquiAPIError
+except ImportError as e:
+    print(f"CẢNH BÁO: Không thể import tts_api_client. Lỗi gốc: {e}.")
+    class CoquiAPIError(Exception): pass
+    class MockApiClient:
+        def generate(self, *args, **kwargs): raise CoquiAPIError("Client API thật chưa được triển khai.")
+    api_client = MockApiClient()
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.urandom(24)
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=1)
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
+app.config['OUTPUT_FOLDER'] = '/tmp/outputs'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+LANGUAGES_FOR_API = { "English": "English", "French": "French", "Spanish": "Spanish", "German": "German", "Italian": "Italian", "Portuguese": "Portuguese", "Polish": "Polish", "Turkish": "Turkish", "Russian": "Russian", "Dutch": "Dutch", "Czech": "Czech", "Arabic": "Arabic", "Chinese": "Chinese", "Japanese": "Japanese", "Korean": "Korean", "Hungarian": "Hungarian", "Hindi": "Hindi" }
+DEFAULT_VOICES = { "male_en": {"name": "English Male", "path": "samples/male_zh.mp3"}, "female_cn": {"name": "Chinese Female", "path": "samples/female_zh.mp3"} }
+DEFAULT_ADVANCED_PARAMS = { 'temperature': 0.75, 'speed': 1.0, 'top_k': 50, 'top_p': 0.85, 'repetition_penalty': 5.0, 'length_penalty': 1.0 }
+UI_STRINGS = {
+    "en": { "script_example": "A: Hello world.\nB: Voice cloning is amazing!", "title": "XTTS Conversation Generator", "subtitle": "Create multi-speaker conversations with custom voices", "manage_speakers": "Manage Speakers", "add_speaker": "Add Speaker", "script_label": "Conversation Script", "script_placeholder": "Example:\nA: Hello world.\nB: Voice cloning is amazing!", "advanced_settings": "Advanced Settings", "generate_button": "Generate Voice", "clear_button_title": "Delete all session data and files", "results_header": "Conversation Results", "loading_generating": "Generating voice...", "loading_sending": "Sending request...", "loading_starting": "Starting...", "loading_processing": "Processing...", "error_checking_status": "Error checking status", "error_starting_job": "Invalid response from server when starting job", "error_occurred": "An error occurred", "confirm_clear": "Are you sure you want to delete all session data?", "error_clearing": "Error during cleanup", "full_conversation": "Full Conversation", "individual_lines": "Individual Lines", "no_results": "No results generated.", "speaker_id_prefix": "Speaker", "voice_select_placeholder": "-- Select Voice --", "voice_source_default": "Default", "voice_source_custom": "Custom", "current_file": "Current file", "no_file_uploaded": "No file uploaded yet."},
+    "vi": { "script_example": "A: Chào thế giới.\nB: Công nghệ nhân bản giọng nói thật tuyệt vời!", "title": "Trình tạo Hội thoại XTTS", "subtitle": "Tạo hội thoại nhiều người nói với giọng tùy chỉnh", "manage_speakers": "Quản lý Người nói", "add_speaker": "Thêm Người nói", "script_label": "Kịch bản Hội thoại", "script_placeholder": "Ví dụ:\nA: Chào thế giới.\nB: Công nghệ nhân bản giọng nói thật tuyệt vời!", "advanced_settings": "Cài đặt Nâng cao", "generate_button": "Tạo Giọng nói", "clear_button_title": "Xóa toàn bộ session và file", "results_header": "Kết quả Hội thoại", "loading_generating": "Đang tạo giọng nói...", "loading_sending": "Đang gửi yêu cầu...", "loading_starting": "Đang bắt đầu...", "loading_processing": "Đang xử lý...", "error_checking_status": "Lỗi khi kiểm tra trạng thái", "error_starting_job": "Phản hồi không hợp lệ từ máy chủ khi bắt đầu công việc", "error_occurred": "Đã xảy ra lỗi", "confirm_clear": "Bạn có chắc muốn xóa toàn bộ dữ liệu phiên làm việc?", "error_clearing": "Có lỗi xảy ra khi dọn dẹp", "full_conversation": "Toàn bộ Hội thoại", "individual_lines": "Từng câu thoại", "no_results": "Không có kết quả nào được tạo ra.", "speaker_id_prefix": "Người nói", "voice_select_placeholder": "-- Chọn giọng --", "voice_source_default": "Mặc định", "voice_source_custom": "Tùy chỉnh", "current_file": "File hiện tại", "no_file_uploaded": "Chưa có file nào được tải lên."},
+    "zh": { "script_example": "A: 你好世界。\nB: 语音克隆技术真是太棒了！", "title": "XTTS 对话生成器", "subtitle": "使用自定义声音创建多说话人对话", "manage_speakers": "说话人管理", "add_speaker": "添加说话人", "script_label": "对话脚本", "script_placeholder": "示例:\nA: 你好世界。\nB: 语音克隆技术真是太棒了！", "advanced_settings": "高级参数设置", "generate_button": "生成语音", "clear_button_title": "删除所有会话数据和文件", "results_header": "对话结果", "loading_generating": "正在生成语音...", "loading_sending": "发送请求中...", "loading_starting": "开始中...", "loading_processing": "处理中...", "error_checking_status": "检查状态时出错", "error_starting_job": "从服务器收到的启动作业响应无效", "error_occurred": "发生错误", "confirm_clear": "您确定要删除所有会话数据吗？", "error_clearing": "清理会话时出错", "full_conversation": "完整对话", "individual_lines": "单句", "no_results": "没有生成结果。", "speaker_id_prefix": "说话人", "voice_select_placeholder": "-- 选择声音 --", "voice_source_default": "默认", "voice_source_custom": "自定义", "current_file": "当前文件", "no_file_uploaded": "尚未上传文件。"}
+}
+SUPPORTED_UI_LANGS = {"en": "English", "vi": "Tiếng Việt", "zh": "简体中文"}
+print("✅ Ứng dụng sẵn sàng. Chế độ giao diện đa ngôn ngữ.")
+jobs: Dict[str, Dict] = {}
+def upload_to_public_service(filepath: str) -> str:
+    try:
+        print(f"Đang upload file {filepath} lên tmpfiles.org...")
+        with open(filepath, 'rb') as f:
+            response = requests.post('https://tmpfiles.org/api/v1/upload', files={'file': f})
+        response.raise_for_status()
+        data = response.json()
+        if data['status'] == 'success':
+            public_url = data['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+            print(f"Upload thành công! URL công khai: {public_url}")
+            return public_url
+        else:
+            raise CoquiAPIError(f"Lỗi khi upload lên tmpfiles.org: {data.get('error', {}).get('message', 'Unknown error')}")
+    except requests.exceptions.RequestException as e:
+        raise CoquiAPIError(f"Lỗi mạng khi upload file: {e}")
+
+def process_single_line_via_api(args):
+    line, index, total_lines, job_data, app_config, _ = args
+    job_id = job_data['job_id']
+    jobs[job_id]['progress'] = f"Đang gửi dòng {index+1}/{total_lines} tới API..."
+    parts = line.split(":", 1)
+    if len(parts) != 2: return None
+    speaker_id, text = parts[0].strip().upper(), parts[1].strip()
+    language_to_generate = job_data.get('language_to_generate')
+    advanced_params = job_data.get('advanced_params', {})
+    config = job_data['speakers_config'][speaker_id]
+    speaker_path = None
+    if config.get('voice_source') == 'uploaded':
+        speaker_path = job_data['voice_map'].get(f"uploaded_{speaker_id}")
+    else:
+        speaker_path = job_data['voice_map'].get(config.get('voice_id'))
+    if not speaker_path or not os.path.exists(speaker_path):
+        raise ValueError(f"Chưa chọn giọng nói hợp lệ cho '{speaker_id}'.")
+    
+    temp_wav_path = None
+    try:
+        temp_wav_path = os.path.join(app_config['UPLOAD_FOLDER'], f"clean_{uuid.uuid4()}.wav")
+        AudioSegment.from_file(speaker_path).export(temp_wav_path, format="wav")
+        public_reference_url = upload_to_public_service(temp_wav_path)
+        
+        # Hàm generate giờ trả về một file WAV đã được chuẩn hóa trong /tmp
+        standardized_result_path = api_client.generate(
+            text=text, 
+            lang=language_to_generate, 
+            reference_wav_url=public_reference_url, 
+            advanced_params=advanced_params
+        )
+        
+        # ⭐ SỬA LỖI: Di chuyển file đã được chuẩn hóa vào thư mục output
+        output_filename = os.path.basename(standardized_result_path)
+        output_path_on_disk = os.path.join(app_config['OUTPUT_FOLDER'], output_filename)
+        shutil.move(standardized_result_path, output_path_on_disk) # Di chuyển thay vì sao chép
+        
+        output_url = f"/outputs/{output_filename}"
+        return {"index": index, "data": {"speaker": speaker_id, "text": text, "path": output_url}, "disk_path": output_path_on_disk}
+    finally:
+        if temp_wav_path and os.path.exists(temp_wav_path):
+            os.remove(temp_wav_path)
+
+# ... (Tất cả các hàm còn lại từ run_tts_job đến cuối file giữ nguyên, chúng đã đúng)
+def run_tts_job(job_id: str, job_data: dict, base_url: str):
+    try:
+        job_data['job_id'] = job_id
+        lines = [l.strip() for l in job_data['script'].strip().split("\n") if l.strip()]
+        temp_results = []
+        jobs[job_id]['status'] = 'processing'
+        app_config = {'OUTPUT_FOLDER': app.config['OUTPUT_FOLDER'], 'UPLOAD_FOLDER': app.config['UPLOAD_FOLDER']}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tasks = [(l, i, len(lines), job_data, app_config, base_url) for i, l in enumerate(lines)]
+            futures = [executor.submit(process_single_line_via_api, task) for task in tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                if result: 
+                    temp_results.append(result)
+        temp_results.sort(key=lambda x: x['index'])
+        audio_files_data = [r['data'] for r in temp_results]
+        paths_to_combine = [r['disk_path'] for r in temp_results]
+        job_data['generated_output_files'] = paths_to_combine
+        jobs[job_id]['progress'] = f"Đang gộp {len(paths_to_combine)} file audio..."
+        combined_path, combined_url = combine_audio_files(paths_to_combine)
+        if combined_path: job_data.setdefault('generated_output_files', []).append(combined_path)
+        jobs[job_id]['status'] = 'completed'
+        jobs[job_id]['result'] = {"results": audio_files_data, "conversation_audio": combined_url}
+    except Exception as e:
+        print(f"[Job {job_id}] Lỗi khi tạo TTS qua API: {e}")
+        jobs[job_id]['status'] = 'failed'
+        jobs[job_id]['error'] = f"Không thể xử lý công việc. Chi tiết: {str(e)}"
+@app.route("/")
+def index_route():
+    new_ui_lang = request.args.get('lang')
+    current_ui_lang = session.get('ui_lang', 'en')
+    if new_ui_lang and new_ui_lang != current_ui_lang:
+        session['ui_lang'] = new_ui_lang
+        session.pop('script', None)
+    final_ui_lang = session.get('ui_lang', 'en')
+    if final_ui_lang not in UI_STRINGS: final_ui_lang = 'en'
+    strings = UI_STRINGS[final_ui_lang]
+    session_params = session.get('advanced_params', {})
+    current_params = {**DEFAULT_ADVANCED_PARAMS, **session_params}
+    session_state = { 'speakers': session.get('speakers', {'A': {'voice_source': 'default', 'voice_id': 'male_en'}, 'B': {'voice_source': 'default', 'voice_id': 'female_cn'}}), 'uploaded_voices': session.get('uploaded_voices', {}), 'script': session.get('script', strings['script_example']), 'language_to_generate': session.get('language_to_generate', 'English'), 'advanced_params': current_params }
+    session.permanent = True
+    return render_template("index.html", ui_lang=final_ui_lang, ui_strings=strings, supported_ui_langs=SUPPORTED_UI_LANGS, languages_for_api=LANGUAGES_FOR_API, default_voices=DEFAULT_VOICES, session_state=session_state)
+@app.route("/generate", methods=["POST"])
+def generate():
+    data = request.form
+    if not data.get('script', '').strip(): return jsonify({"error": "Kịch bản không được để trống."}), 400
+    session['script'] = data.get('script')
+    session['speakers'] = json.loads(data.get('speakers_config', '{}'))
+    session['language_to_generate'] = data.get('language_to_generate')
+    advanced_params = {}
+    for key in DEFAULT_ADVANCED_PARAMS.keys():
+        try: advanced_params[key] = float(data.get(key))
+        except (ValueError, TypeError): advanced_params[key] = DEFAULT_ADVANCED_PARAMS[key]
+    session['advanced_params'] = advanced_params
+    session.setdefault('uploaded_voices', {})
+    voice_map = {key: value['path'] for key, value in DEFAULT_VOICES.items()}
+    for sid, vdata in session.get('uploaded_voices', {}).items():
+        voice_map[f"uploaded_{sid}"] = vdata['path']
+    for fkey, fstorage in request.files.items():
+        if fstorage.filename != '':
+            sid = fkey.split('_')[-1]
+            if sid in session['uploaded_voices'] and os.path.exists(session['uploaded_voices'][sid]['path']):
+                os.remove(session['uploaded_voices'][sid]['path'])
+            save_path, _ = handle_file_upload(fstorage)
+            session['uploaded_voices'][sid] = {'path': save_path, 'name': os.path.basename(fstorage.filename)}
+            voice_map[f"uploaded_{sid}"] = save_path
+    session.modified = True
+    clear_output_files()
+    job_id = str(uuid.uuid4())
+    public_url_for_job = BASE_URL if BASE_URL else request.host_url
+    job_data = { 'script': session['script'], 'language_to_generate': session['language_to_generate'], 'speakers_config': session['speakers'], 'voice_map': voice_map, 'advanced_params': session['advanced_params'], 'generated_output_files': [] }
+    jobs[job_id] = {'status': 'queued', 'progress': 'Đang chờ xử lý...'}
+    thread = threading.Thread(target=run_tts_job, args=(job_id, job_data, public_url_for_job))
+    thread.start()
+    return jsonify({"status": "processing", "job_id": job_id, "updated_session_state": session.to_dict() if hasattr(session, 'to_dict') else dict(session)})
+@app.route("/status/<job_id>")
+def get_status(job_id):
+    job = jobs.get(job_id)
+    if not job: return jsonify({"status": "failed", "error": "Job ID không tồn tại."}), 404
+    if job.get('status') in ['completed', 'failed']:
+        job_info_to_return = jobs.pop(job_id)
+        session.setdefault('generated_output_files', []).extend(job_info_to_return.get('generated_output_files', []))
+        session.modified = True
+        return jsonify(job_info_to_return)
+    return jsonify(job)
+def combine_audio_files(file_paths):
+    if not file_paths: return None, None
+    combined = AudioSegment.empty()
+    for path in file_paths:
+        if os.path.exists(path):
+            try: combined += AudioSegment.from_file(path)
+            except Exception as e: print(f"Lỗi khi đọc file {path} để nối: {e}"); continue
+    filename = f"conversation_{uuid.uuid4()}.wav"
+    disk_path = os.path.join(app.config['OUTPUT_FOLDER'], filename)
+    combined.export(disk_path, format="wav")
+    return disk_path, f"/outputs/{filename}"
+def clear_output_files():
+    files_to_delete = session.pop('generated_output_files', [])
+    for file_path in files_to_delete:
+        if os.path.exists(file_path):
+            try: os.remove(file_path)
+            except OSError as e: print(f"Lỗi khi xóa file output {file_path}: {e}")
+def handle_file_upload(file):
+    filename = f"upload_{uuid.uuid4()}_{os.path.basename(file.filename)}"
+    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(save_path)
+    return save_path, os.path.basename(file.filename)
+@app.route("/clear_all")
+def clear_all_session_data():
+    clear_output_files()
+    for voice_data in session.get('uploaded_voices', {}).values():
+        if os.path.exists(voice_data['path']):
+            try: os.remove(voice_data['path'])
+            except OSError as e: print(f"Lỗi khi xóa file upload {voice_data['path']}: {e}")
+    session.clear()
+    global jobs; jobs = {}
+    return jsonify({"status": "success", "message": "Toàn bộ session và file đã được xóa."})
+asgi_app = WsgiToAsgi(app)
+if __name__ == "__main__":
+    import uvicorn
+    print("Khởi chạy máy chủ Uvicorn cho việc phát triển...")
+    uvicorn.run("app:asgi_app", host="0.0.0.0", port=7861, reload=True)
+
+===== ./tts_api_client.py =====
+# tts_api_client.py (PHIÊN BẢN CHUẨN HÓA FILE ĐẦU RA)
+import time
+import uuid
+import os
+import shutil
+from typing import Optional, Dict
+
+try:
+    from gradio_client import Client
+except ImportError as e:
+    raise ImportError(f"Không thể import gradio_client. Hãy đảm bảo bạn đã chạy 'pip install gradio_client'. Lỗi gốc: {e}")
+
+# ⭐ NÂNG CẤP: Import thêm pydub để chuẩn hóa file
+try:
+    from pydub import AudioSegment
+except ImportError:
+    raise ImportError("Không thể import pydub. Hãy đảm bảo bạn đã chạy 'pip install pydub'.")
+
+class CoquiAPIError(Exception): # Đổi tên lỗi để nhất quán
+    """Lỗi tùy chỉnh cho các vấn đề liên quan đến API call."""
+    pass
+
+class CoquiAPIClient:
+    def __init__(self, space_url="hasanbasbunar/Voice-Cloning-XTTS-v2"):
+        print(f"Đang kết nối tới Gradio client: {space_url}...")
+        try:
+            self.client = Client(src=space_url)
+            print("Kết nối Gradio client thành công!")
+        except Exception as e:
+            print(f"LỖI NGHIÊM TRỌNG: Không thể khởi tạo Gradio client: {e}")
+            self.client = None
+
+    def _standardize_output_to_wav(self, temp_api_path: str) -> str:
+        """
+        Đọc file kết quả từ API (bất kể định dạng) và xuất ra một file WAV sạch.
+        Điều này đảm bảo tính nhất quán cho việc xử lý về sau.
+        """
+        try:
+            print(f"Đang chuẩn hóa file kết quả của API: {temp_api_path}")
+            # Đọc file âm thanh từ đường dẫn tạm
+            audio = AudioSegment.from_file(temp_api_path)
+            
+            # Tạo một đường dẫn mới cho file WAV đã được chuẩn hóa
+            standardized_wav_path = os.path.join("/tmp", f"api_output_std_{uuid.uuid4()}.wav")
+            
+            # Xuất ra file WAV
+            audio.export(standardized_wav_path, format="wav")
+            
+            print(f"Đã tạo file WAV chuẩn hóa: {standardized_wav_path}")
+            return standardized_wav_path
+        except Exception as e:
+            raise CoquiAPIError(f"Lỗi khi chuẩn hóa file âm thanh đầu ra: {e}")
+
+    def generate(
+        self, 
+        text: str, 
+        lang: str, 
+        reference_wav_url: str,
+        advanced_params: Optional[dict] = None
+    ) -> str:
+        if not self.client:
+            raise CoquiAPIError("Gradio client chưa được khởi tạo thành công.")
+
+        api_params = {
+            "text": text,
+            "reference_audio_url": reference_wav_url,
+            "example_audio_name": None,
+            "language": lang,
+            "api_name": "/voice_clone_synthesis"
+        }
+        
+        if advanced_params:
+            api_params.update(advanced_params)
+
+        start_time = time.time()
+        print(f"Đang gửi yêu cầu tới API '{self.client.space_id}' với URL tham chiếu: {reference_wav_url}")
+
+        try:
+            # API trả về đường dẫn đến một file tạm (có thể là mp3 hoặc wav)
+            temp_api_result_path = self.client.predict(**api_params)
+
+            end_time = time.time()
+            print(f"API đã phản hồi sau {end_time - start_time:.2f} giây.")
+            
+            if not temp_api_result_path or not os.path.exists(temp_api_result_path):
+                 raise CoquiAPIError(f"API không trả về đường dẫn file audio hợp lệ. Kết quả: {temp_api_result_path}")
+
+            # ⭐ SỬA LỖI: Chuẩn hóa file kết quả này thành WAV trước khi trả về
+            final_wav_path = self._standardize_output_to_wav(temp_api_result_path)
+
+            return final_wav_path
+
+        except Exception as e:
+            # In lỗi chi tiết hơn
+            print(f"!!! LỖI KHI GỌI GRADIO API: {type(e).__name__} - {e} !!!")
+            # Ném lại lỗi để app.py có thể bắt
+            raise CoquiAPIError(f"Lỗi khi thực hiện predict từ Gradio API: {e}")
+
+api_client = CoquiAPIClient()
+print("File tts_api_client.py (phiên bản chuẩn hóa đầu ra) đã được đọc và thực thi thành công.")
+
+===== ./templates/index.html =====
+<!DOCTYPE html>
+<html lang="{{ ui_lang }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ ui_strings.title }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .loader { border: 5px solid #f3f3f3; border-top: 5px solid #3b82f6; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #advanced-panel { max-height: 0; overflow: hidden; transition: max-height 0.5s ease-in-out, padding 0.5s ease-in-out, border-width 0.3s ease-in-out; padding-top: 0; padding-bottom: 0; border-top-width: 0px; }
+        #advanced-toggle:checked ~ #advanced-panel { max-height: 500px; padding-top: 1rem; padding-bottom: 1rem; border-top-width: 1px; }
+        .panel { transition: opacity 0.3s ease-in-out, max-height 0.3s ease-in-out; }
+        .voice-source-radio { position: absolute; opacity: 0; width: 0; height: 0; }
+        .voice-source-label {
+            cursor: pointer; padding: 0.25rem 0.75rem; border: 1px solid #d1d5db; border-bottom-width: 0;
+            background-color: #f9fafb; color: #6b7280; font-size: 0.875rem;
+            border-top-left-radius: 0.375rem; border-top-right-radius: 0.375rem;
+            transition: all 0.2s ease-in-out;
+        }
+        .voice-source-radio:checked + .voice-source-label {
+            background-color: white; color: #2563eb; border-color: #d1d5db; font-weight: 600;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: #2563eb; cursor: pointer;
+            transition: background 0.2s ease-in-out;
+        }
+        input[type="range"]:hover::-webkit-slider-thumb { background: #1d4ed8; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div class="container mx-auto p-4 md:p-6 lg:p-8 max-w-7xl"> 
+        
+        <header class="text-center mb-8 relative">
+            <div class="absolute top-0 right-0 text-xs sm:text-sm bg-white/50 backdrop-blur-sm px-2 py-1 rounded-md">
+                {% for code, name in supported_ui_langs.items() %}
+                    <a href="?lang={{ code }}" class="p-1 {{ 'font-bold text-blue-600' if code == ui_lang else 'text-gray-500 hover:text-blue-500' }}">{{ name }}</a>
+                    {% if not loop.last %} <span class="text-gray-300">|</span> {% endif %}
+                {% endfor %}
+            </div>
+            <h1 class="text-3xl md:text-4xl font-bold text-blue-600 pt-10 sm:pt-0">🎙️ {{ ui_strings.title }}</h1>
+            <p class="text-gray-500 mt-2">{{ ui_strings.subtitle }}</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <!-- Cột điều khiển -->
+            <div class="bg-white p-6 rounded-2xl shadow-lg border border-gray-200/80">
+                <form id="tts-form" class="space-y-6">
+                    <div>
+                         <label for="language_to_generate" class="block text-sm font-medium text-gray-700 mb-1">Language to Generate</label>
+                         <select id="language_to_generate" name="language_to_generate" class="w-full p-2 text-sm border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 transition">
+                            {% for code, name in languages_for_api.items() %}
+                            <option value="{{ name }}" {% if name == session_state.language_to_generate %}selected{% endif %}>{{ code }}</option>
+                            {% endfor %}
+                         </select>
+                    </div>
+
+                    <div class="border-t border-gray-200 pt-6">
+                        <h3 class="text-lg font-semibold mb-3 text-gray-800">{{ ui_strings.manage_speakers }}</h3>
+                        <div id="speakers-container" class="space-y-4"></div>
+                        <button type="button" id="add-speaker-btn" class="mt-4 text-xs bg-green-100 text-green-800 font-bold py-2 px-4 rounded-lg hover:bg-green-200 transition-colors flex items-center gap-1.5">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" /></svg>
+                            {{ ui_strings.add_speaker }}
+                        </button>
+                    </div>
+
+                    <div class="border-t border-gray-200 pt-6">
+                        <label for="script" class="block text-sm font-medium text-gray-700 mb-1">{{ ui_strings.script_label }}</label>
+                        <textarea id="script" name="script" rows="6" class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm transition" placeholder="{{ ui_strings.script_placeholder }}"></textarea>
+                    </div>
+                    
+                    <div class="border-t border-gray-200 pt-6">
+                        <input type="checkbox" id="advanced-toggle" class="hidden">
+                        <label for="advanced-toggle" class="cursor-pointer text-sm font-semibold text-blue-600 hover:text-blue-800 flex items-center justify-between">
+                            <span>{{ ui_strings.advanced_settings }}</span>
+                            <svg class="w-4 h-4 transition-transform transform" id="advanced-arrow" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                        </label>
+                        <div id="advanced-panel" class="mt-4 border-gray-200">
+                             <div id="advanced-sliders" class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+                                <!-- Các thanh trượt sẽ được thêm vào đây bởi JS -->
+                             </div>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center space-x-3 pt-4">
+                        <button type="submit" id="generate-btn" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 transition-all shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 text-base">
+                            {{ ui_strings.generate_button }}
+                        </button>
+                        <button type="button" id="clear-session-btn" title="{{ ui_strings.clear_button_title }}" class="flex-shrink-0 bg-red-500 text-white p-3 rounded-lg hover:bg-red-600 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                            <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Cột kết quả -->
+            <div class="bg-white p-6 rounded-2xl shadow-lg border border-gray-200/80 flex flex-col">
+                <h2 class="text-xl font-semibold mb-4 border-b border-gray-200 pb-3">{{ ui_strings.results_header }}</h2>
+                <div id="loading" class="hidden flex-col items-center justify-center flex-grow">
+                    <div class="loader"></div>
+                    <p id="loading-message" class="mt-4 text-gray-500"></p>
+                </div>
+                <div id="error-message" class="hidden bg-red-50 border border-red-300 text-red-700 px-4 py-3 rounded-lg text-sm"></div>
+                <div id="result-area" class="space-y-4 overflow-y-auto flex-grow">
+                    <div id="result-placeholder" class="flex flex-col items-center justify-center h-full text-center text-gray-400">
+                        <svg class="w-16 h-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.636 5.636a9 9 0 0112.728 0M18.364 18.364A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+                        <p>{{ ui_strings.no_results }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.location.search.includes('lang=')) {
+                history.replaceState(null, '', window.location.pathname);
+            }
+
+            // --- DATA ---
+            let sessionState = {{ session_state|tojson|safe }};
+            const defaultVoices = {{ default_voices|tojson|safe }};
+            const UI_STRINGS = {{ ui_strings|tojson|safe }};
+            const ADVANCED_PARAMS_CONFIG = {
+                'temperature': { min: 0, max: 1, step: 0.05 }, 'speed': { min: 0.5, max: 2.0, step: 0.05 },
+                'top_k': { min: 1, max: 100, step: 1 }, 'top_p': { min: 0.1, max: 1, step: 0.05 },
+                'repetition_penalty': { min: 1, max: 10, step: 0.5 }, 'length_penalty': { min: 1, max: 10, step: 0.5 }
+            };
+
+            // --- ELEMENTS ---
+            const form = document.getElementById('tts-form');
+            const speakersContainer = document.getElementById('speakers-container');
+            const addSpeakerBtn = document.getElementById('add-speaker-btn');
+            const clearSessionBtn = document.getElementById('clear-session-btn');
+            const generateBtn = document.getElementById('generate-btn');
+            const loadingSpinner = document.getElementById('loading');
+            const loadingMessage = document.getElementById('loading-message');
+            const errorMessageDiv = document.getElementById('error-message');
+            const resultArea = document.getElementById('result-area');
+            const resultPlaceholder = document.getElementById('result-placeholder');
+            const advancedToggle = document.getElementById('advanced-toggle');
+            const advancedArrow = document.getElementById('advanced-arrow');
+            const advancedSlidersContainer = document.getElementById('advanced-sliders');
+
+            let pollInterval;
+            
+            // --- HÀM ---
+            function createDefaultVoiceOptions(selectedVoiceId) {
+                let options = `<option value="">${UI_STRINGS.voice_select_placeholder}</option>`;
+                for (const [id, voice] of Object.entries(defaultVoices)) {
+                    options += `<option value="${id}" ${id === selectedVoiceId ? 'selected' : ''}>${voice.name}</option>`;
+                }
+                return options;
+            }
+
+            function createSpeakerCard(speakerId, speakerConfig) {
+                const card = document.createElement('div');
+                card.className = 'bg-gray-50 rounded-xl shadow-sm overflow-hidden border border-gray-200';
+                card.dataset.speakerId = speakerId;
+                const hasUploadedVoice = sessionState.uploaded_voices && sessionState.uploaded_voices[speakerId];
+                const useUploaded = speakerConfig.voice_source === 'uploaded' && hasUploadedVoice;
+                card.innerHTML = `
+                    <div class="bg-gray-100 p-3 flex justify-between items-center border-b border-gray-200">
+                        <div class="flex items-center gap-3">
+                            <span class="w-8 h-8 flex items-center justify-center bg-blue-600 text-white font-semibold rounded-full text-base">${speakerId}</span>
+                            <h4 class="text-base font-semibold text-gray-800">${UI_STRINGS.speaker_id_prefix} ${speakerId}</h4>
+                        </div>
+                        <button type="button" class="remove-speaker-btn text-gray-400 hover:text-red-600 transition-colors p-1 rounded-full">
+                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                    </div>
+                    <div>
+                        <div class="flex border-b border-gray-200 bg-white">
+                            <input type="radio" id="source_default_${speakerId}" name="source_${speakerId}" value="default" class="voice-source-radio" ${!useUploaded ? 'checked' : ''}>
+                            <label for="source_default_${speakerId}" class="voice-source-label">${UI_STRINGS.voice_source_default}</label>
+                            <input type="radio" id="source_uploaded_${speakerId}" name="source_${speakerId}" value="uploaded" class="voice-source-radio" ${useUploaded ? 'checked' : ''}>
+                            <label for="source_uploaded_${speakerId}" class="voice-source-label">${UI_STRINGS.voice_source_custom}</label>
+                        </div>
+                        <div class="p-4 bg-white space-y-3">
+                            <div class="panel panel-default" style="max-height: ${useUploaded ? '0' : '500px'}; opacity: ${useUploaded ? '0' : '1'};">
+                               <select name="voice_${speakerId}" class="voice-select w-full p-2 text-sm border-gray-300 rounded-lg">${createDefaultVoiceOptions(speakerConfig.voice_id)}</select>
+                            </div>
+                            <div class="panel panel-custom" style="max-height: ${!useUploaded ? '0' : '500px'}; opacity: ${!useUploaded ? '0' : '1'};">
+                                <div class="mb-2">
+                                    ${hasUploadedVoice ? `<p class="text-xs text-gray-800">${UI_STRINGS.current_file}: <span class="font-semibold text-green-600">${sessionState.uploaded_voices[speakerId].name}</span></p>` : `<p class="text-xs text-gray-500">${UI_STRINGS.no_file_uploaded}</p>`}
+                                </div>
+                                <input type="file" name="file_${speakerId}" class="voice-file w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-lg file:border file:border-gray-200 file:font-semibold file:bg-gray-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors" accept="audio/*">
+                            </div>
+                        </div>
+                    </div>`;
+                speakersContainer.appendChild(card);
+                card.querySelector('.remove-speaker-btn').addEventListener('click', () => card.remove());
+                card.querySelectorAll(`input[name="source_${speakerId}"]`).forEach(radio => {
+                    radio.addEventListener('change', (e) => {
+                        const showCustom = e.target.value === 'uploaded';
+                        card.querySelector('.panel-default').style.maxHeight = showCustom ? '0' : '500px';
+                        card.querySelector('.panel-default').style.opacity = showCustom ? '0' : '1';
+                        card.querySelector('.panel-custom').style.maxHeight = showCustom ? '500px' : '0';
+                        card.querySelector('.panel-custom').style.opacity = showCustom ? '1' : '0';
+                    });
+                });
+            }
+            
+            function getNextSpeakerId() {
+                const existingIds = Array.from(speakersContainer.querySelectorAll('[data-speaker-id]')).map(card => card.dataset.speakerId);
+                let charCode = 65;
+                while (true) {
+                    const nextId = String.fromCharCode(charCode);
+                    if (!existingIds.includes(nextId)) return nextId;
+                    charCode++;
+                }
+            }
+            
+            function renderAllSpeakers() {
+                speakersContainer.innerHTML = '';
+                const speakersToRender = (sessionState.speakers && Object.keys(sessionState.speakers).length > 0) ? sessionState.speakers : {
+                    'A': {'voice_source': 'default', 'voice_id': 'male_en'},
+                    'B': {'voice_source': 'default', 'voice_id': 'female_cn'}
+                };
+                for (const [id, config] of Object.entries(speakersToRender)) {
+                    createSpeakerCard(id, config);
+                }
+            }
+            
+            function getSpeakersConfigFromDOM() {
+                const config = {};
+                speakersContainer.querySelectorAll('[data-speaker-id]').forEach(card => {
+                    const id = card.dataset.speakerId;
+                    const sourceRadio = card.querySelector(`input[name="source_${id}"]:checked`);
+                    const sourceValue = sourceRadio ? sourceRadio.value : 'default';
+                    config[id] = { voice_source: sourceValue };
+                    if (sourceValue === 'default') {
+                        config[id].voice_id = card.querySelector('.voice-select').value;
+                    }
+                });
+                return config;
+            }
+            
+            function displayResults(data) {
+                resultPlaceholder.classList.add('hidden');
+                let resultHTML = '';
+                const finalResult = data.result;
+                if (finalResult.conversation_audio) {
+                    resultHTML += `<div class="p-4 border-b-2 border-blue-200 bg-blue-50 rounded-lg">
+                                    <h3 class="font-semibold text-sm mb-2 text-blue-800">${UI_STRINGS.full_conversation}</h3>
+                                    <audio controls class="w-full h-10"><source src="${finalResult.conversation_audio}?t=${new Date().getTime()}" type="audio/wav"></audio>
+                                   </div>`;
+                }
+                if (finalResult.results && finalResult.results.length > 0) {
+                    resultHTML += `<h3 class="font-semibold text-sm mt-4 mb-2">${UI_STRINGS.individual_lines}</h3>`;
+                    finalResult.results.forEach(item => {
+                        resultHTML += `<div class="p-3 border rounded-lg bg-gray-50">
+                                        <p class="text-sm text-gray-800"><span class="font-bold">${item.speaker}:</span> <span class="italic text-gray-600">"${item.text}"</span></p>
+                                        <audio controls class="w-full mt-2 h-8"><source src="${item.path}?t=${new Date().getTime()}" type="audio/wav"></audio>
+                                       </div>`;
+                    });
+                }
+                resultArea.innerHTML = resultHTML || `<p class="text-gray-500 text-sm">${UI_STRINGS.no_results}</p>`;
+            }
+
+            function pollStatus(jobId) {
+                pollInterval = setInterval(async () => {
+                    try {
+                        const response = await fetch(`/status/${jobId}`);
+                        const data = await response.json();
+                        if (data.status === 'completed') {
+                            clearInterval(pollInterval);
+                            loadingSpinner.classList.add('hidden');
+                            generateBtn.disabled = false;
+                            generateBtn.innerHTML = UI_STRINGS.generate_button;
+                            displayResults(data);
+                        } else if (data.status === 'failed') {
+                            clearInterval(pollInterval);
+                            throw new Error(data.error || UI_STRINGS.error_starting_job);
+                        } else {
+                            loadingMessage.textContent = data.progress || UI_STRINGS.loading_processing;
+                        }
+                    } catch (error) {
+                        clearInterval(pollInterval);
+                        errorMessageDiv.textContent = `${UI_STRINGS.error_checking_status}: ${error.message}`;
+                        errorMessageDiv.classList.remove('hidden');
+                        loadingSpinner.classList.add('hidden');
+                        generateBtn.disabled = false;
+                        generateBtn.innerHTML = UI_STRINGS.generate_button;
+                    }
+                }, 2000);
+            }
+
+            function initializeAdvancedControls() {
+                advancedSlidersContainer.innerHTML = ''; 
+                for (const [name, config] of Object.entries(ADVANCED_PARAMS_CONFIG)) {
+                    const div = document.createElement('div');
+                    const label = name.charAt(0).toUpperCase() + name.slice(1).replace('_', ' ');
+                    const value = sessionState.advanced_params[name] || '0.00';
+                    div.innerHTML = `
+                        <label for="${name}" class="block text-xs font-medium text-gray-600">${label}: <span class="param-value font-bold text-blue-600">${parseFloat(value).toFixed(2)}</span></label>
+                        <input type="range" id="${name}" name="${name}" min="${config.min}" max="${config.max}" step="${config.step}" value="${value}" class="param-slider w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                    `;
+                    advancedSlidersContainer.appendChild(div);
+                }
+                advancedSlidersContainer.querySelectorAll('.param-slider').forEach(slider => {
+                    const valueSpan = slider.previousElementSibling.querySelector('.param-value');
+                    slider.addEventListener('input', () => {
+                        valueSpan.textContent = parseFloat(slider.value).toFixed(2);
+                    });
+                });
+            }
+            
+            // --- EVENT LISTENERS ---
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                if (pollInterval) clearInterval(pollInterval);
+                generateBtn.disabled = true;
+                generateBtn.innerHTML = `<span class="animate-pulse">${UI_STRINGS.loading_starting}</span>`;
+                loadingSpinner.classList.remove('hidden');
+                loadingMessage.textContent = UI_STRINGS.loading_sending;
+                errorMessageDiv.classList.add('hidden');
+                resultArea.innerHTML = ''; 
+                resultPlaceholder.classList.add('hidden');
+                const formData = new FormData(form);
+                formData.append('speakers_config', JSON.stringify(getSpeakersConfigFromDOM()));
+                document.querySelectorAll('input[type="file"]').forEach(input => {
+                    if (input.files.length === 0) formData.delete(input.name);
+                });
+                try {
+                    const response = await fetch('/generate', { method: 'POST', body: formData });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error || `HTTP Error: ${response.status}`);
+                    
+                    sessionState = data.updated_session_state;
+                    
+                    renderAllSpeakers();
+                    initializeAdvancedControls();
+                    if (data.status === 'processing' && data.job_id) {
+                        generateBtn.innerHTML = `<span class="animate-pulse">${UI_STRINGS.loading_processing}</span>`;
+                        pollStatus(data.job_id);
+                    } else {
+                        throw new Error(UI_STRINGS.error_starting_job);
+                    }
+                } catch (error) {
+                    errorMessageDiv.textContent = `${UI_STRINGS.error_occurred}: ${error.message}`;
+                    errorMessageDiv.classList.remove('hidden');
+                    resultPlaceholder.classList.remove('hidden');
+                    generateBtn.disabled = false;
+                    generateBtn.innerHTML = UI_STRINGS.generate_button;
+                    loadingSpinner.classList.add('hidden');
+                }
+            });
+            
+            addSpeakerBtn.addEventListener('click', () => {
+                const newId = getNextSpeakerId();
+                const firstDefaultVoiceId = Object.keys(defaultVoices)[0] || '';
+                createSpeakerCard(newId, { voice_source: 'default', voice_id: firstDefaultVoiceId });
+            });
+            
+            clearSessionBtn.addEventListener('click', async () => { 
+                if (!confirm(UI_STRINGS.confirm_clear)) return;
+                try {
+                    const response = await fetch('/clear_all');
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        window.location.href = window.location.pathname;
+                    }
+                } catch (error) {
+                    alert(UI_STRINGS.error_clearing);
+                }
+            });
+
+            advancedToggle.addEventListener('change', () => {
+                advancedArrow.classList.toggle('rotate-180', advancedToggle.checked);
+            });
+
+            // --- INITIALIZATION ---
+            document.getElementById('script').value = sessionState.script; 
+            document.getElementById('language_to_generate').value = sessionState.language_to_generate;
+            renderAllSpeakers();
+            initializeAdvancedControls();
+        });
+    </script>
+</body>
+</html>
+
+===== ./.devcontainer/devcontainer.json =====
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/python
+{
+	"name": "Python 3",
+	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	"image": "mcr.microsoft.com/devcontainers/python:1-3.10-bookworm",
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	"features": {
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {}
+	},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y ffmpeg && pip3 install --user -r ../requirements.txt",
+	// Configure tool-specific properties.
+	// "customizations": {},
+
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	"remoteUser": "vscode"
+}
+
+
+===== DIRECTORY TREE =====
+./
+    requirements.txt
+    .gitattributes
+    README.md
+    app.py
+    tts_api_client.py
+    Dockerfile
+    static/
+        outputs/
+        uploads/
+            upload_383a87b5-37c4-4228-95e0-9c62b0e9f446_ttsMP3.com_VoiceText_2025-6-29_15-45-52.mp3
+            upload_f307cc8b-0371-44a9-813e-01b7fcc893fa_ttsMP3.com_VoiceText_2025-6-29_15-45-43.mp3
+    templates/
+        index.html
+    .github/
+        dependabot.yml
+    samples/
+        male_zh.mp3
+        female_zh.mp3
+    .devcontainer/
+        devcontainer.json
