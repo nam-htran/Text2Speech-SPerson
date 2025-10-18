@@ -3,8 +3,7 @@
 A powerful web-based tool for generating multi-speaker audio conversations using the Coqui XTTS-v2 model. This application offers a flexible dual-mode operation: **Local Mode** for on-premise processing utilizing your own hardware (CPU or GPU), and **API Mode** which offloads the generation to a remote Gradio-based API service.
 
 This tool is perfect for content creators, developers, and researchers who need to quickly prototype dialogues, create audio for videos, or experiment with voice cloning technology.
-![Uploading {3D69D657-4340-4F20-A856-B1A547C243A4}.png…]()
-
+<img width="627" height="733" alt="{3D69D657-4340-4F20-A856-B1A547C243A4}" src="https://github.com/user-attachments/assets/6fcdf490-1202-48e2-936c-6d583cd5769d" />
 ## ✨ Features
 
 - **Dual Generation Modes**:
