@@ -1,6 +1,7 @@
 # XTTS Conversation Generator (Local + API)
 
 A powerful web-based tool for generating multi-speaker audio conversations using the Coqui XTTS-v2 model. This application offers a flexible dual-mode operation: **Local Mode** for on-premise processing utilizing your own hardware (CPU or GPU), and **API Mode** which offloads the generation to a remote Gradio-based API service.
+<img width="3171" height="3655" alt="Mermaid Chart - Create complex, visual diagrams with text -2025-10-18-080513" src="https://github.com/user-attachments/assets/9f28c863-b58a-4524-a44a-58bfa5139b66" />
 
 This tool is perfect for content creators, developers, and researchers who need to quickly prototype dialogues, create audio for videos, or experiment with voice cloning technology.
 
