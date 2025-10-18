@@ -1,6 +1,7 @@
 [Online FlowChart & Diagrams Editor - Mermaid Live Editor.html](https://github.com/user-attachments/files/22983096/Online.FlowChart.Diagrams.Editor.-.Mermaid.Live.Editor.html)# XTTS Conversation Generator (Local + API)
 
 A powerful web-based tool for generating multi-speaker audio conversations using the Coqui XTTS-v2 model. This application offers a flexible dual-mode operation: **Local Mode** for on-premise processing utilizing your own hardware (CPU or GPU), and **API Mode** which offloads the generation to a remote Gradio-based API service.
+![Uploading Mermaid Chart - Create complex, visual diagrams with text.-2025-10-18-080513.png…]()
 
 This tool is perfect for content creators, developers, and researchers who need to quickly prototype dialogues, create audio for videos, or experiment with voice cloning technology.
 
